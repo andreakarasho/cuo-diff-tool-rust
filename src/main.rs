@@ -1,15 +1,26 @@
 use binary_reader::{BinaryReader, Endian};
 use flate2::read::GzDecoder;
+use regex::Regex;
 use std::{
+    char::MAX,
     collections::HashMap,
     fs::{File, OpenOptions},
     io::{Error, Read, Seek, SeekFrom, Write},
     mem,
-    path::Path, vec,
+    path::Path,
+    vec,
 };
 
 fn main() {
     println!("Hello, world!");
+
+    patch(PatchArgs {
+        source_dir: String::from("D:\\Giochi\\Ultima Online Classic"),
+        target_dir: String::from("D:\\Giochi\\Ultima Online Eternium"),
+        output_dir: String::from("./output"),
+        file_to_process: String::from("artLegacyMUL.uop"),
+    })
+    .unwrap();
 }
 
 fn patch(args: PatchArgs) -> std::io::Result<()> {
@@ -19,34 +30,27 @@ fn patch(args: PatchArgs) -> std::io::Result<()> {
         std::fs::create_dir_all(&output_path)?;
     }
 
-    if let Some(mul) = get_uop_mul_name(&args.file_to_process) {
-        //uop_to_mul(&mul);
-    }
+    uop_to_mul(&args)?;
 
     Ok(())
 }
 
-fn uop_to_mul(
-    uop: &Path,
-    mul: &Path,
-    idx: &Path,
-    chunk_ids0: &HashMap<u64, usize>,
-    chunk_ids1: &HashMap<u64, usize>,
-) -> std::io::Result<()> {
-    let mut uop_file = File::open(&uop)?;
-    let mut mul_file = File::create(&mul)?;
-    let mut idx_file = File::create(&idx)?;
+fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
+    let descriptor = get_file_descriptor(&args.file_to_process);
+
+    let mut uop_file = File::open(&Path::new(&args.source_dir).join(&args.file_to_process))?;
+    let mut mul_file = File::create(&Path::new(&args.output_dir).join(&descriptor.mul))?;
+    let mut idx_file = File::create(&Path::new(&args.output_dir).join(&descriptor.idx))?;
 
     let mut uop_reader = BinaryReader::from_file(&mut uop_file);
-    uop_reader.set_endian(Endian::Big);
-
-    let file_type = FileType::Art;
-
-    // let mut mul_writer = BinaryReader::from_file(&mut mul_file);
-    // mul_writer.set_endian(Endian::Big);
-
-    // let mut idx_writer = BinaryReader::from_file(&mut idx_file);
-    // idx_writer.set_endian(Endian::Big);
+    uop_reader.set_endian(Endian::Little);
+    
+    let hashes: HashMap<u64, usize> = descriptor
+        .uop_patterns
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (hash_little_2(&s), i))
+        .collect();
 
     let magic = uop_reader.read_u32()?;
     if magic != 0x50594D {
@@ -83,7 +87,7 @@ fn uop_to_mul(
                 continue;
             }
 
-            if file_type == FileType::Multi && offset.identifier == 0x126D1E99DDEDEE0A {
+            if descriptor.file_type == FileType::Multi && offset.identifier == 0x126D1E99DDEDEE0A {
                 let mut bin = OpenOptions::new()
                     .write(true)
                     .append(true)
@@ -104,9 +108,12 @@ fn uop_to_mul(
                 continue;
             }
 
-            let chunk_id = chunk_ids0
-                .get(&offset.identifier)
-                .unwrap_or_else(|| chunk_ids1.get(&offset.identifier).unwrap());
+            // let chunk_id = hashes_vec
+            //     .iter()
+            //     .find_map(|s| s.get(&offset.identifier))
+            //     .unwrap();
+
+            let chunk_id = hashes.get(&offset.identifier).unwrap();
 
             uop_reader.jmp((offset.offset + (offset.header_length as i64)) as usize);
 
@@ -119,16 +126,16 @@ fn uop_to_mul(
                 chunk_data.extend_from_slice(GzDecoder::new(chunk_data_raw).get_mut());
             }
 
-            if file_type == FileType::Map {
+            if descriptor.file_type == FileType::Map {
                 mul_file.seek(SeekFrom::Start((chunk_id * 0xC4000) as u64))?;
                 mul_file.write(&chunk_data)?;
             } else {
                 let mut data_offset = 0;
 
                 idx_file.seek(SeekFrom::Start(*chunk_id as u64 * 12))?;
-                idx_file.write(&(mul_file.stream_position()? as u32).to_be_bytes())?;
+                idx_file.write(&(mul_file.stream_position()? as u32).to_le_bytes())?;
 
-                match file_type {
+                match descriptor.file_type {
                     FileType::Gump => {
                         let width = u32::from_le_bytes([
                             chunk_data[0],
@@ -143,18 +150,18 @@ fn uop_to_mul(
                             chunk_data[7],
                         ]);
 
-                        idx_file.write(&(chunk_data.len() - 8).to_be_bytes())?;
-                        idx_file.write(&((width << 16) | height).to_be_bytes())?;
+                        idx_file.write(&(chunk_data.len() - 8).to_le_bytes())?;
+                        idx_file.write(&((width << 16) | height).to_le_bytes())?;
 
                         data_offset = 8;
                     }
                     FileType::Sound => {
-                        idx_file.write(&chunk_data.len().to_be_bytes())?;
-                        idx_file.write(&(chunk_id + 1).to_be_bytes())?;
+                        idx_file.write(&chunk_data.len().to_le_bytes())?;
+                        idx_file.write(&(chunk_id + 1).to_le_bytes())?;
                     }
                     FileType::Multi => {
                         let mut multi_reader = BinaryReader::from_u8(&chunk_data);
-                        multi_reader.set_endian(Endian::Big);
+                        multi_reader.set_endian(Endian::Little);
 
                         let mut vec = vec![];
 
@@ -173,16 +180,16 @@ fn uop_to_mul(
                                 multi_reader.adv(cliloc_count as usize * mem::size_of::<u32>());
                             }
 
-                            id.to_be_bytes().map(|s| vec.push(s));
-                            x.to_be_bytes().map(|s| vec.push(s));
-                            y.to_be_bytes().map(|s| vec.push(s));
-                            z.to_be_bytes().map(|s| vec.push(s));
+                            id.to_le_bytes().map(|s| vec.push(s));
+                            x.to_le_bytes().map(|s| vec.push(s));
+                            y.to_le_bytes().map(|s| vec.push(s));
+                            z.to_le_bytes().map(|s| vec.push(s));
                             (match flags {
                                 256u16 => 0x0000000100000001u64,
                                 257u16 | 1u16 => 0u64,
                                 _ => 1u64,
                             })
-                            .to_be_bytes()
+                            .to_le_bytes()
                             .map(|s| vec.push(s));
                         }
 
@@ -192,11 +199,11 @@ fn uop_to_mul(
                         chunk_data = vec![0u8; len as usize];
                         mul_file.read(&mut chunk_data)?;
 
-                        idx_file.write(&chunk_data.len().to_be_bytes())?;
+                        idx_file.write(&chunk_data.len().to_le_bytes())?;
                         idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
                     }
                     _ => {
-                        idx_file.write(&chunk_data.len().to_be_bytes())?;
+                        idx_file.write(&chunk_data.len().to_le_bytes())?;
                         idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
                     }
                 }
@@ -215,147 +222,259 @@ fn uop_to_mul(
     Ok(())
 }
 
-fn create_hashes(hash_pattern: &String, maxId: usize) -> HashMap<u64, usize> {
-    let mut map = HashMap::new();
+// fn create_hashes(hash_pattern: &String, max_id: usize) -> HashMap<u64, usize> {
+//     let mut map = HashMap::new();
 
-    for i in 0..maxId {
-        map.insert(hash_little2(hash_pattern), i);
+//     if hash_pattern.is_empty() {
+//         return map;
+//     }
+
+//     for i in 0..max_id {
+//         map.insert(hash_little_2(&format!(hash_pattern, i)), i);
+//     }
+
+//     map
+// }
+
+fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
+    let (mul_name, idx_name, file_type, type_index) = get_uop_mul_name(&uop_file).unwrap();
+    //let (pattern0, pattern1, max_index) = get_uop_hash_pattern(&file_type, type_index);
+
+    const MAX_ID: i32 = 0x7FFFF;
+
+    let (pattern0, pattern1, max_index) = match file_type {
+        FileType::Art => (
+            (0..0x13FDC)
+                .into_iter()
+                .map(|i| format!("build/artlegacymul/{:08}.tga", i))
+                .collect::<Vec<String>>(),
+            Vec::<String>::new(),
+            0x13FDC,
+        ),
+        FileType::Gump => (
+            (0..MAX_ID)
+                .into_iter()
+                .map(|i| format!("build/gumpartlegacymul/{:08}.tga", i))
+                .collect(),
+                (0..MAX_ID)
+                .into_iter()
+                .map(|i| format!("build/gumpartlegacymul/{:07}.tga", i))
+                .collect(),
+            MAX_ID,
+        ),
+        FileType::Map => (
+            (0..MAX_ID)
+                .into_iter()
+                .map(|i| format!("build/map{}legacymul/{:08}.dat", type_index, i))
+                .collect(),
+            Vec::<String>::new(),
+            MAX_ID,
+        ),
+        FileType::Sound => (
+            (0..MAX_ID)
+                .into_iter()
+                .map(|i| format!("build/soundlegacymul/{:08}.dat", i))
+                .collect(),
+            Vec::<String>::new(),
+            MAX_ID,
+        ),
+        FileType::Multi => (
+            (0..u16::MAX)
+                .into_iter()
+                .map(|i| format!("build/multicollection/{:06}.bin", i))
+                .collect(),
+            Vec::<String>::new(),
+            u16::MAX as i32,
+        ),
+    };
+
+    let mut all_patterns: Vec<String> = Vec::new();
+    all_patterns.extend(pattern0);
+    all_patterns.extend(pattern1);
+
+    FileDescriptor {
+        uop: uop_file.clone(),
+        uop_patterns: all_patterns,
+        max_index: max_index,
+        mul: mul_name,
+        idx: idx_name,
+        file_type: file_type,
     }
-
-    map
 }
 
-fn get_uop_mul_name(uop_file: &String) -> Option<String> {
+fn get_uop_mul_name(uop_file: &String) -> Option<(String, String, FileType, i32)> {
     match uop_file.as_str() {
-        "artLegacyMUL" => Some(String::from("art")),
-        "gumpartLegacyMUL" => Some(String::from("gumpart")),
-        "MultiCollection" => Some(String::from("multi")),
-        "soundLegacyMUL" => Some(String::from("sound")),
-        "map0LegacyMUL" => Some(String::from("map")),
-        _ => None,
+        "artLegacyMUL.uop" => Some((
+            String::from("art.mul"),
+            String::from("artidx.mul"),
+            FileType::Art,
+            -1,
+        )),
+        "gumpartLegacyMUL.uop" => Some((
+            String::from("gumpart.mul"),
+            String::from("gumpidx.mul"),
+            FileType::Gump,
+            -1,
+        )),
+        "MultiCollection.uop" => Some((
+            String::from("multi.mul"),
+            String::from("multi.idx"),
+            FileType::Multi,
+            -1,
+        )),
+        "soundLegacyMUL.uop" => Some((
+            String::from("sound.mul"),
+            String::from("soundidx.mul"),
+            FileType::Sound,
+            -1,
+        )),
+        _ => {
+            let re = Regex::new(r"^map(\d+)LegacyMUL$").unwrap();
+            if let Some(cap) = re.captures(uop_file) {
+                let num_str = cap.get(1).unwrap().as_str();
+                let num = num_str.parse::<i32>().ok().unwrap();
+                return Some((
+                    String::from(format!("map{}", num)),
+                    String::from(""),
+                    FileType::Map,
+                    num,
+                ));
+            }
+
+            None
+        }
     }
 }
 
-fn hash_little2(s: &str) -> u64 {
+fn get_uop_hash_pattern(file_type: &FileType, type_index: i32) -> (String, String, i32) {
+    const MAX_ID: i32 = 0x7FFFF;
+
+    match file_type {
+        FileType::Art => (
+            String::from("build/artlegacymul/{:08}.tga"),
+            String::from(""),
+            0x13FDC,
+        ),
+        FileType::Gump => (
+            String::from("build/gumpartlegacymul/{:08}.tga"),
+            String::from("build/gumpartlegacymul/{0:{:07}}.tga"),
+            MAX_ID,
+        ),
+        FileType::Map => (
+            String::from(format!("build/map{}legacymul/{{:08}}.dat", type_index)),
+            String::from(""),
+            MAX_ID,
+        ),
+        FileType::Sound => (
+            String::from("build/soundlegacymul/{:08}.dat"),
+            String::from(""),
+            MAX_ID,
+        ),
+        FileType::Multi => (
+            String::from("build/multicollection/{:06}.bin"),
+            String::from(""),
+            u16::MAX as i32,
+        ),
+    }
+}
+
+fn hash_little_2(s: &str) -> u64 {
     let mut length = s.len();
 
-    let mut a: u32 = 0xDEADBEEF + length as u32;
-    let mut b: u32 = 0xDEADBEEF + length as u32;
-    let mut c: u32 = 0xDEADBEEF + length as u32;
+    let mut a = 0xDEADBEEF + length as u32;
+    let mut b = 0xDEADBEEF + length as u32;
+    let mut c = 0xDEADBEEF + length as u32;
 
-    let mut k = 0usize;
+    let mut k = 0;
 
     while length > 12 {
-        let mut chunks = s[k..].as_bytes().chunks_exact(4);
+        a = a.wrapping_add(s.as_bytes()[k] as u32);
+        a = a.wrapping_add((s.as_bytes()[k + 1] as u32) << 8);
+        a = a.wrapping_add((s.as_bytes()[k + 2] as u32) << 16);
+        a = a.wrapping_add((s.as_bytes()[k + 3] as u32) << 24);
+        b = b.wrapping_add(s.as_bytes()[k + 4] as u32);
+        b = b.wrapping_add((s.as_bytes()[k + 5] as u32) << 8);
+        b = b.wrapping_add((s.as_bytes()[k + 6] as u32) << 16);
+        b = b.wrapping_add((s.as_bytes()[k + 7] as u32) << 24);
+        c = c.wrapping_add(s.as_bytes()[k + 8] as u32);
+        c = c.wrapping_add((s.as_bytes()[k + 9] as u32) << 8);
+        c = c.wrapping_add((s.as_bytes()[k + 10] as u32) << 16);
+        c = c.wrapping_add((s.as_bytes()[k + 11] as u32) << 24);
 
-        for chunk in &mut chunks {
-            let word = u32::from_le_bytes(chunk.try_into().unwrap());
+        a ^= c;
+        a = a.wrapping_sub(c.rotate_left(4));
+        c = c.wrapping_add(b);
+        b ^= a;
+        b = b.wrapping_sub(a.rotate_left(6));
+        a = a.wrapping_add(c);
+        c = c.wrapping_sub(b);
+        c = (c ^ (b >> 8)).wrapping_add(b);
+        b = b.wrapping_add(a);
+        a = a.wrapping_sub(c);
+        a = (a ^ (c << 16)).wrapping_add(c);
+        c = c.wrapping_add(b);
+        b = b.wrapping_sub(a);
+        b = (b ^ (a >> 19)).wrapping_add(a);
+        a = a.wrapping_add(c);
+        c = c.wrapping_sub(b);
+        c = (c ^ (b >> 4)).wrapping_add(b);
+        b = b.wrapping_add(a);
 
-            a = a.wrapping_add(word);
-            b = b.wrapping_add(word);
-            c = c.wrapping_add(word);
-
-            a = a.wrapping_sub(c);
-            a ^= c.rotate_left(4);
-            c = c.wrapping_add(b);
-            b = b.wrapping_sub(a);
-            b ^= a.rotate_left(6);
-            a = a.wrapping_add(c);
-            c = c.wrapping_sub(b);
-            c ^= b.rotate_left(8);
-            b = b.wrapping_add(a);
-            a = a.wrapping_sub(c);
-            a ^= c.rotate_left(16);
-            c = c.wrapping_add(b);
-            b = b.wrapping_sub(a);
-            b ^= a.rotate_left(19);
-            a = a.wrapping_add(c);
-            c = c.wrapping_sub(b);
-            c ^= b.rotate_left(4);
-            b = b.wrapping_add(a);
-        }
-
-        k += chunks.remainder().len();
-        length -= chunks.len();
+        length -= 12;
+        k += 12;
     }
 
     if length != 0 {
-        let mut remainder = s[k..].as_bytes();
-
-        remainder = match remainder.len() {
+        match length {
             12 => {
-                c = c.wrapping_add(u32::from_le_bytes(remainder[8..].try_into().unwrap()) << 24);
-                &remainder[..8]
+                c = c.wrapping_add((s.as_bytes()[k + 11] as u32) << 24);
+                // fallthrough
             }
             11 => {
-                c = c.wrapping_add(
-                    u32::from_le_bytes(remainder[8..].try_into().unwrap()) << 24
-                        | u32::from_le_bytes([remainder[7], 0, 0, 0]) << 16,
-                );
-                &remainder[..7]
+                c = c.wrapping_add((s.as_bytes()[k + 10] as u32) << 16);
+                // fallthrough
             }
             10 => {
-                c = c.wrapping_add(
-                    u32::from_le_bytes(remainder[8..].try_into().unwrap()) << 24
-                        | u32::from_le_bytes([remainder[7], remainder[6], 0, 0]) << 8,
-                );
-                &remainder[..6]
+                c = c.wrapping_add((s.as_bytes()[k + 9] as u32) << 8);
+                // fallthrough
             }
             9 => {
-                c = c.wrapping_add(
-                    u32::from_le_bytes(remainder[8..].try_into().unwrap()) << 24
-                        | u32::from_le_bytes([remainder[7], remainder[6], remainder[5], 0]),
-                );
-                &remainder[..5]
+                c = c.wrapping_add(s.as_bytes()[k + 8] as u32);
+                // fallthrough
             }
             8 => {
-                b = b.wrapping_add(u32::from_le_bytes(remainder[4..].try_into().unwrap()) << 24);
-                &remainder[..4]
+                b = b.wrapping_add((s.as_bytes()[k + 7] as u32) << 24);
+                // fallthrough
             }
             7 => {
-                b = b.wrapping_add(
-                    u32::from_le_bytes(remainder[4..].try_into().unwrap()) << 24
-                        | u32::from_le_bytes([remainder[3], 0, 0, 0]) << 16,
-                );
-                &remainder[..3]
+                b = b.wrapping_add((s.as_bytes()[k + 6] as u32) << 16);
+                // fallthrough
             }
             6 => {
-                b = b.wrapping_add(
-                    u32::from_le_bytes(remainder[4..].try_into().unwrap()) << 24
-                        | u32::from_le_bytes([remainder[3], remainder[2], 0, 0]) << 8,
-                );
-                &remainder[..2]
+                b = b.wrapping_add((s.as_bytes()[k + 5] as u32) << 8);
+                // fallthrough
             }
             5 => {
-                b = b.wrapping_add(
-                    u32::from_le_bytes(remainder[4..].try_into().unwrap()) << 24
-                        | u32::from_le_bytes([remainder[3], remainder[2], remainder[1], 0]),
-                );
-                &remainder[..1]
+                b = b.wrapping_add(s.as_bytes()[k + 4] as u32);
+                // fallthrough
             }
             4 => {
-                a = a.wrapping_add(u32::from_le_bytes(remainder.try_into().unwrap()));
-                &[]
+                a = a.wrapping_add((s.as_bytes()[k + 3] as u32) << 24);
+                // fallthrough
             }
             3 => {
-                a = a.wrapping_add(u32::from_le_bytes([
-                    remainder[2],
-                    remainder[1],
-                    remainder[0],
-                    0,
-                ]));
-                &[]
+                a = a.wrapping_add((s.as_bytes()[k + 2] as u32) << 16);
+                // fallthrough
             }
             2 => {
-                a = a.wrapping_add(u32::from_le_bytes([remainder[1], remainder[0], 0, 0]));
-                &[]
+                a = a.wrapping_add((s.as_bytes()[k + 1] as u32) << 8);
+                // fallthrough
             }
             1 => {
-                a = a.wrapping_add(u32::from_le_bytes([remainder[0], 0, 0, 0]));
-                &[]
+                a = a.wrapping_add(s.as_bytes()[k] as u32);
             }
-            _ => remainder,
-        };
+            _ => unreachable!(),
+        }
 
         c ^= b;
         c = c.wrapping_sub(b.rotate_left(14));
@@ -371,33 +490,6 @@ fn hash_little2(s: &str) -> u64 {
         b = b.wrapping_sub(a.rotate_left(14));
         c ^= b;
         c = c.wrapping_sub(b.rotate_left(24));
-
-        for chunk in remainder.chunks_exact(4) {
-            let word = u32::from_le_bytes(chunk.try_into().unwrap());
-
-            a = a.wrapping_add(word);
-            b = b.wrapping_add(word);
-            c = c.wrapping_add(word);
-
-            a = a.wrapping_sub(c);
-            a ^= c.rotate_left(4);
-            c = c.wrapping_add(b);
-            b = b.wrapping_sub(a);
-            b ^= a.rotate_left(6);
-            a = a.wrapping_add(c);
-            c = c.wrapping_sub(b);
-            c ^= b.rotate_left(8);
-            b = b.wrapping_add(a);
-            a = a.wrapping_sub(c);
-            a ^= c.rotate_left(16);
-            c = c.wrapping_add(b);
-            b = b.wrapping_sub(a);
-            b ^= a.rotate_left(19);
-            a = a.wrapping_add(c);
-            c = c.wrapping_sub(b);
-            c ^= b.rotate_left(4);
-            b = b.wrapping_add(a);
-        }
     }
 
     ((b as u64) << 32) | (c as u64)
@@ -410,6 +502,15 @@ enum FileType {
     Map,
     Sound,
     Multi,
+}
+
+struct FileDescriptor {
+    uop: String,
+    uop_patterns: Vec<String>,
+    max_index: i32,
+    mul: String,
+    idx: String,
+    file_type: FileType,
 }
 
 struct TableEntry {
