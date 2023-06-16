@@ -2,25 +2,27 @@ use binary_reader::{BinaryReader, Endian};
 use flate2::read::GzDecoder;
 use regex::Regex;
 use std::{
-    char::MAX,
     collections::HashMap,
     fs::{File, OpenOptions},
     io::{Error, Read, Seek, SeekFrom, Write},
     mem,
     path::Path,
-    vec,
+    vec, time::Instant,
 };
 
 fn main() {
-    println!("Hello, world!");
+    println!("start patching...");
+    let start = Instant::now();
 
     patch(PatchArgs {
         source_dir: String::from("D:\\Giochi\\Ultima Online Classic"),
-        target_dir: String::from("D:\\Giochi\\Ultima Online Eternium"),
         output_dir: String::from("./output"),
         file_to_process: String::from("artLegacyMUL.uop"),
     })
     .unwrap();
+
+    let duration = start.elapsed();
+    println!("Time elapsed is: {:?}", duration);
 }
 
 fn patch(args: PatchArgs) -> std::io::Result<()> {
@@ -44,7 +46,7 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
 
     let mut uop_reader = BinaryReader::from_file(&mut uop_file);
     uop_reader.set_endian(Endian::Little);
-    
+
     let hashes: HashMap<u64, usize> = descriptor
         .uop_patterns
         .iter()
@@ -62,7 +64,6 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
     let mut next_table = uop_reader.read_i64()?;
 
     loop {
-        // might not work
         uop_reader.jmp(next_table as usize);
 
         let entries_count = uop_reader.read_i32()?;
@@ -108,107 +109,102 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                 continue;
             }
 
-            // let chunk_id = hashes_vec
-            //     .iter()
-            //     .find_map(|s| s.get(&offset.identifier))
-            //     .unwrap();
+            if let Some(chunk_id) = hashes.get(&offset.identifier) {
+                uop_reader.jmp((offset.offset + (offset.header_length as i64)) as usize);
 
-            let chunk_id = hashes.get(&offset.identifier).unwrap();
+                let chunk_data_raw = uop_reader.read_bytes(offset.size as usize)?;
+                let mut chunk_data = vec![];
+                chunk_data.extend_from_slice(chunk_data_raw);
 
-            uop_reader.jmp((offset.offset + (offset.header_length as i64)) as usize);
-
-            let chunk_data_raw = uop_reader.read_bytes(offset.size as usize)?;
-            let mut chunk_data = vec![];
-            chunk_data.extend_from_slice(chunk_data_raw);
-
-            if offset.compression == 1 {
-                chunk_data.clear();
-                chunk_data.extend_from_slice(GzDecoder::new(chunk_data_raw).get_mut());
-            }
-
-            if descriptor.file_type == FileType::Map {
-                mul_file.seek(SeekFrom::Start((chunk_id * 0xC4000) as u64))?;
-                mul_file.write(&chunk_data)?;
-            } else {
-                let mut data_offset = 0;
-
-                idx_file.seek(SeekFrom::Start(*chunk_id as u64 * 12))?;
-                idx_file.write(&(mul_file.stream_position()? as u32).to_le_bytes())?;
-
-                match descriptor.file_type {
-                    FileType::Gump => {
-                        let width = u32::from_le_bytes([
-                            chunk_data[0],
-                            chunk_data[1],
-                            chunk_data[2],
-                            chunk_data[3],
-                        ]);
-                        let height = u32::from_le_bytes([
-                            chunk_data[4],
-                            chunk_data[5],
-                            chunk_data[6],
-                            chunk_data[7],
-                        ]);
-
-                        idx_file.write(&(chunk_data.len() - 8).to_le_bytes())?;
-                        idx_file.write(&((width << 16) | height).to_le_bytes())?;
-
-                        data_offset = 8;
-                    }
-                    FileType::Sound => {
-                        idx_file.write(&chunk_data.len().to_le_bytes())?;
-                        idx_file.write(&(chunk_id + 1).to_le_bytes())?;
-                    }
-                    FileType::Multi => {
-                        let mut multi_reader = BinaryReader::from_u8(&chunk_data);
-                        multi_reader.set_endian(Endian::Little);
-
-                        let mut vec = vec![];
-
-                        _ = multi_reader.read_u32()?;
-                        let count = multi_reader.read_u32()?;
-
-                        for _ in 0..count {
-                            let id = multi_reader.read_u16()?;
-                            let x = multi_reader.read_i16()?;
-                            let y = multi_reader.read_i16()?;
-                            let z = multi_reader.read_i16()?;
-                            let flags = multi_reader.read_u16()?;
-                            let cliloc_count = multi_reader.read_i32()?;
-
-                            if cliloc_count > 0 {
-                                multi_reader.adv(cliloc_count as usize * mem::size_of::<u32>());
-                            }
-
-                            id.to_le_bytes().map(|s| vec.push(s));
-                            x.to_le_bytes().map(|s| vec.push(s));
-                            y.to_le_bytes().map(|s| vec.push(s));
-                            z.to_le_bytes().map(|s| vec.push(s));
-                            (match flags {
-                                256u16 => 0x0000000100000001u64,
-                                257u16 | 1u16 => 0u64,
-                                _ => 1u64,
-                            })
-                            .to_le_bytes()
-                            .map(|s| vec.push(s));
-                        }
-
-                        let len = mul_file.stream_position()?;
-                        mul_file.seek(SeekFrom::Start(0))?;
-
-                        chunk_data = vec![0u8; len as usize];
-                        mul_file.read(&mut chunk_data)?;
-
-                        idx_file.write(&chunk_data.len().to_le_bytes())?;
-                        idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
-                    }
-                    _ => {
-                        idx_file.write(&chunk_data.len().to_le_bytes())?;
-                        idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
-                    }
+                if offset.compression == 1 {
+                    chunk_data.clear();
+                    chunk_data.extend_from_slice(GzDecoder::new(chunk_data_raw).get_mut());
                 }
 
-                mul_file.write(&chunk_data[data_offset..])?;
+                if descriptor.file_type == FileType::Map {
+                    mul_file.seek(SeekFrom::Start((chunk_id * 0xC4000) as u64))?;
+                    mul_file.write(&chunk_data)?;
+                } else {
+                    let mut data_offset = 0;
+
+                    idx_file.seek(SeekFrom::Start(*chunk_id as u64 * 12))?;
+                    idx_file.write(&(mul_file.stream_position()? as u32).to_le_bytes())?;
+
+                    match descriptor.file_type {
+                        FileType::Gump => {
+                            let width = u32::from_le_bytes([
+                                chunk_data[0],
+                                chunk_data[1],
+                                chunk_data[2],
+                                chunk_data[3],
+                            ]);
+                            let height = u32::from_le_bytes([
+                                chunk_data[4],
+                                chunk_data[5],
+                                chunk_data[6],
+                                chunk_data[7],
+                            ]);
+
+                            idx_file.write(&(chunk_data.len() - 8).to_le_bytes())?;
+                            idx_file.write(&((width << 16) | height).to_le_bytes())?;
+
+                            data_offset = 8;
+                        }
+                        FileType::Sound => {
+                            idx_file.write(&chunk_data.len().to_le_bytes())?;
+                            idx_file.write(&(chunk_id + 1).to_le_bytes())?;
+                        }
+                        FileType::Multi => {
+                            let mut multi_reader = BinaryReader::from_u8(&chunk_data);
+                            multi_reader.set_endian(Endian::Little);
+
+                            let mut vec = vec![];
+
+                            _ = multi_reader.read_u32()?;
+                            let count = multi_reader.read_u32()?;
+
+                            for _ in 0..count {
+                                let id = multi_reader.read_u16()?;
+                                let x = multi_reader.read_i16()?;
+                                let y = multi_reader.read_i16()?;
+                                let z = multi_reader.read_i16()?;
+                                let flags = multi_reader.read_u16()?;
+                                let cliloc_count = multi_reader.read_i32()?;
+
+                                if cliloc_count > 0 {
+                                    multi_reader.adv(cliloc_count as usize * mem::size_of::<u32>());
+                                }
+
+                                id.to_le_bytes().map(|s| vec.push(s));
+                                x.to_le_bytes().map(|s| vec.push(s));
+                                y.to_le_bytes().map(|s| vec.push(s));
+                                z.to_le_bytes().map(|s| vec.push(s));
+                                (match flags {
+                                    256u16 => 0x0000000100000001u64,
+                                    257u16 | 1u16 => 0u64,
+                                    _ => 1u64,
+                                })
+                                .to_le_bytes()
+                                .map(|s| vec.push(s));
+                            }
+
+                            let len = mul_file.stream_position()?;
+                            mul_file.seek(SeekFrom::Start(0))?;
+
+                            chunk_data = vec![0u8; len as usize];
+                            mul_file.read(&mut chunk_data)?;
+
+                            idx_file.write(&(chunk_data.len() as i32).to_le_bytes())?;
+                            idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
+                        }
+                        _ => {
+                            idx_file.write(&(chunk_data.len() as i32).to_le_bytes())?;
+                            idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
+                        }
+                    }
+
+                    mul_file.write(&chunk_data[data_offset..])?;
+                }
             }
         }
 
@@ -222,23 +218,8 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
     Ok(())
 }
 
-// fn create_hashes(hash_pattern: &String, max_id: usize) -> HashMap<u64, usize> {
-//     let mut map = HashMap::new();
-
-//     if hash_pattern.is_empty() {
-//         return map;
-//     }
-
-//     for i in 0..max_id {
-//         map.insert(hash_little_2(&format!(hash_pattern, i)), i);
-//     }
-
-//     map
-// }
-
 fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
     let (mul_name, idx_name, file_type, type_index) = get_uop_mul_name(&uop_file).unwrap();
-    //let (pattern0, pattern1, max_index) = get_uop_hash_pattern(&file_type, type_index);
 
     const MAX_ID: i32 = 0x7FFFF;
 
@@ -246,7 +227,7 @@ fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
         FileType::Art => (
             (0..0x13FDC)
                 .into_iter()
-                .map(|i| format!("build/artlegacymul/{:08}.tga", i))
+                .map(|i| String::from(format!("build/artlegacymul/{:08}.tga", i)))
                 .collect::<Vec<String>>(),
             Vec::<String>::new(),
             0x13FDC,
@@ -254,18 +235,18 @@ fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
         FileType::Gump => (
             (0..MAX_ID)
                 .into_iter()
-                .map(|i| format!("build/gumpartlegacymul/{:08}.tga", i))
+                .map(|i| String::from(format!("build/gumpartlegacymul/{:08}.tga", i)))
                 .collect(),
-                (0..MAX_ID)
+            (0..MAX_ID)
                 .into_iter()
-                .map(|i| format!("build/gumpartlegacymul/{:07}.tga", i))
+                .map(|i| String::from(format!("build/gumpartlegacymul/{:07}.tga", i)))
                 .collect(),
             MAX_ID,
         ),
         FileType::Map => (
             (0..MAX_ID)
                 .into_iter()
-                .map(|i| format!("build/map{}legacymul/{:08}.dat", type_index, i))
+                .map(|i| String::from(format!("build/map{}legacymul/{:08}.dat", type_index, i)))
                 .collect(),
             Vec::<String>::new(),
             MAX_ID,
@@ -273,7 +254,7 @@ fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
         FileType::Sound => (
             (0..MAX_ID)
                 .into_iter()
-                .map(|i| format!("build/soundlegacymul/{:08}.dat", i))
+                .map(|i| String::from(format!("build/soundlegacymul/{:08}.dat", i)))
                 .collect(),
             Vec::<String>::new(),
             MAX_ID,
@@ -281,7 +262,7 @@ fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
         FileType::Multi => (
             (0..u16::MAX)
                 .into_iter()
-                .map(|i| format!("build/multicollection/{:06}.bin", i))
+                .map(|i| String::from(format!("build/multicollection/{:06}.bin", i)))
                 .collect(),
             Vec::<String>::new(),
             u16::MAX as i32,
@@ -346,38 +327,6 @@ fn get_uop_mul_name(uop_file: &String) -> Option<(String, String, FileType, i32)
     }
 }
 
-fn get_uop_hash_pattern(file_type: &FileType, type_index: i32) -> (String, String, i32) {
-    const MAX_ID: i32 = 0x7FFFF;
-
-    match file_type {
-        FileType::Art => (
-            String::from("build/artlegacymul/{:08}.tga"),
-            String::from(""),
-            0x13FDC,
-        ),
-        FileType::Gump => (
-            String::from("build/gumpartlegacymul/{:08}.tga"),
-            String::from("build/gumpartlegacymul/{0:{:07}}.tga"),
-            MAX_ID,
-        ),
-        FileType::Map => (
-            String::from(format!("build/map{}legacymul/{{:08}}.dat", type_index)),
-            String::from(""),
-            MAX_ID,
-        ),
-        FileType::Sound => (
-            String::from("build/soundlegacymul/{:08}.dat"),
-            String::from(""),
-            MAX_ID,
-        ),
-        FileType::Multi => (
-            String::from("build/multicollection/{:06}.bin"),
-            String::from(""),
-            u16::MAX as i32,
-        ),
-    }
-}
-
 fn hash_little_2(s: &str) -> u64 {
     let mut length = s.len();
 
@@ -401,95 +350,114 @@ fn hash_little_2(s: &str) -> u64 {
         c = c.wrapping_add((s.as_bytes()[k + 10] as u32) << 16);
         c = c.wrapping_add((s.as_bytes()[k + 11] as u32) << 24);
 
-        a ^= c;
-        a = a.wrapping_sub(c.rotate_left(4));
-        c = c.wrapping_add(b);
-        b ^= a;
-        b = b.wrapping_sub(a.rotate_left(6));
-        a = a.wrapping_add(c);
-        c = c.wrapping_sub(b);
-        c = (c ^ (b >> 8)).wrapping_add(b);
-        b = b.wrapping_add(a);
+
         a = a.wrapping_sub(c);
-        a = (a ^ (c << 16)).wrapping_add(c);
+        a ^= (c << 4) | (c >> 28);
+
         c = c.wrapping_add(b);
         b = b.wrapping_sub(a);
-        b = (b ^ (a >> 19)).wrapping_add(a);
+        b ^= (a << 6) | (a >> 26);
+
         a = a.wrapping_add(c);
         c = c.wrapping_sub(b);
-        c = (c ^ (b >> 4)).wrapping_add(b);
-        b = b.wrapping_add(a);
+        c ^= (b << 8) | (b >> 24);
 
+        b = b.wrapping_add(a);
+        a = a.wrapping_sub(c);
+        a ^= (c << 16) | (c >> 16);
+
+        c = c.wrapping_add(b);
+        b = b.wrapping_sub(a);
+        b ^= (a << 19) | (a >> 13);
+
+        a = a.wrapping_add(c);
+        c = c.wrapping_sub(b);
+        c ^= (b << 4) | (b >> 28);
+
+        b = b.wrapping_add(a);
+       
         length -= 12;
         k += 12;
     }
 
     if length != 0 {
-        match length {
-            12 => {
-                c = c.wrapping_add((s.as_bytes()[k + 11] as u32) << 24);
-                // fallthrough
+        let mut remains = length;
+
+        while remains > 0 {
+            match remains {
+                12 => {
+                    c = c.wrapping_add((s.as_bytes()[k + 11] as u32) << 24);
+                    // fallthrough
+                }
+                11 => {
+                    c = c.wrapping_add((s.as_bytes()[k + 10] as u32) << 16);
+                    // fallthrough
+                }
+                10 => {
+                    c = c.wrapping_add((s.as_bytes()[k + 9] as u32) << 8);
+                    // fallthrough
+                }
+                9 => {
+                    c = c.wrapping_add(s.as_bytes()[k + 8] as u32);
+                    // fallthrough
+                }
+                8 => {
+                    b = b.wrapping_add((s.as_bytes()[k + 7] as u32) << 24);
+                    // fallthrough
+                }
+                7 => {
+                    b = b.wrapping_add((s.as_bytes()[k + 6] as u32) << 16);
+                    // fallthrough
+                }
+                6 => {
+                    b = b.wrapping_add((s.as_bytes()[k + 5] as u32) << 8);
+                    // fallthrough
+                }
+                5 => {
+                    b = b.wrapping_add(s.as_bytes()[k + 4] as u32);
+                    // fallthrough
+                }
+                4 => {
+                    a = a.wrapping_add((s.as_bytes()[k + 3] as u32) << 24);
+                    // fallthrough
+                }
+                3 => {
+                    a = a.wrapping_add((s.as_bytes()[k + 2] as u32) << 16);
+                    // fallthrough
+                }
+                2 => {
+                    a = a.wrapping_add((s.as_bytes()[k + 1] as u32) << 8);
+                    // fallthrough
+                }
+                1 => {
+                    a = a.wrapping_add(s.as_bytes()[k] as u32);
+                }
+                _ => unreachable!(),
             }
-            11 => {
-                c = c.wrapping_add((s.as_bytes()[k + 10] as u32) << 16);
-                // fallthrough
-            }
-            10 => {
-                c = c.wrapping_add((s.as_bytes()[k + 9] as u32) << 8);
-                // fallthrough
-            }
-            9 => {
-                c = c.wrapping_add(s.as_bytes()[k + 8] as u32);
-                // fallthrough
-            }
-            8 => {
-                b = b.wrapping_add((s.as_bytes()[k + 7] as u32) << 24);
-                // fallthrough
-            }
-            7 => {
-                b = b.wrapping_add((s.as_bytes()[k + 6] as u32) << 16);
-                // fallthrough
-            }
-            6 => {
-                b = b.wrapping_add((s.as_bytes()[k + 5] as u32) << 8);
-                // fallthrough
-            }
-            5 => {
-                b = b.wrapping_add(s.as_bytes()[k + 4] as u32);
-                // fallthrough
-            }
-            4 => {
-                a = a.wrapping_add((s.as_bytes()[k + 3] as u32) << 24);
-                // fallthrough
-            }
-            3 => {
-                a = a.wrapping_add((s.as_bytes()[k + 2] as u32) << 16);
-                // fallthrough
-            }
-            2 => {
-                a = a.wrapping_add((s.as_bytes()[k + 1] as u32) << 8);
-                // fallthrough
-            }
-            1 => {
-                a = a.wrapping_add(s.as_bytes()[k] as u32);
-            }
-            _ => unreachable!(),
+
+            remains -= 1;
         }
 
         c ^= b;
-        c = c.wrapping_sub(b.rotate_left(14));
+        c = c.wrapping_sub((b << 14) | (b >> 18));
+        
         a ^= c;
-        a = a.wrapping_sub(c.rotate_left(11));
+        a = a.wrapping_sub((c << 11) | (c >> 21));
+
         b ^= a;
-        b = b.wrapping_sub(a.rotate_left(25));
+        b = b.wrapping_sub((a << 25) | (a >> 7));
+
         c ^= b;
-        c = c.wrapping_sub(b.rotate_left(16));
+        c = c.wrapping_sub((b << 16) | (b >> 16));
+
         a ^= c;
-        a = a.wrapping_sub(c.rotate_left(4));
+        a = a.wrapping_sub((c << 4) | (c >> 28));
+
         b ^= a;
-        b = b.wrapping_sub(a.rotate_left(14));
+        b = b.wrapping_sub((a << 14) | (a >> 18));
+
         c ^= b;
-        c = c.wrapping_sub(b.rotate_left(24));
+        c = c.wrapping_sub((b << 24) | (b >> 8));
     }
 
     ((b as u64) << 32) | (c as u64)
@@ -525,7 +493,6 @@ struct TableEntry {
 
 struct PatchArgs {
     source_dir: String,
-    target_dir: String,
     output_dir: String,
     file_to_process: String,
 }
