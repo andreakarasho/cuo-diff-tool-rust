@@ -1,6 +1,12 @@
 use binary_reader::{BinaryReader, Endian};
 use flate2::read::GzDecoder;
-use std::{collections::HashMap, fs::File, io::{Error, Seek, SeekFrom, Write}, path::Path};
+use std::{
+    collections::HashMap,
+    fs::{File, OpenOptions},
+    io::{Error, Read, Seek, SeekFrom, Write},
+    mem,
+    path::Path, vec,
+};
 
 fn main() {
     println!("Hello, world!");
@@ -21,23 +27,26 @@ fn patch(args: PatchArgs) -> std::io::Result<()> {
 }
 
 fn uop_to_mul(
-    uop: &String,
+    uop: &Path,
+    mul: &Path,
+    idx: &Path,
     chunk_ids0: &HashMap<u64, usize>,
     chunk_ids1: &HashMap<u64, usize>,
 ) -> std::io::Result<()> {
-    let mut mul_file = File::create("")?;
-    let mut idx_file = File::create("")?;
-    let mut uop_file = File::open(uop)?;
-  
+    let mut uop_file = File::open(&uop)?;
+    let mut mul_file = File::create(&mul)?;
+    let mut idx_file = File::create(&idx)?;
+
     let mut uop_reader = BinaryReader::from_file(&mut uop_file);
     uop_reader.set_endian(Endian::Big);
 
-    let mut mul_writer = BinaryReader::from_file(&mut mul_file);
-    mul_writer.set_endian(Endian::Big);
+    let file_type = FileType::Art;
 
-    let mut idx_writer = BinaryReader::from_file(&mut idx_file);
-    idx_writer.set_endian(Endian::Big);
-    
+    // let mut mul_writer = BinaryReader::from_file(&mut mul_file);
+    // mul_writer.set_endian(Endian::Big);
+
+    // let mut idx_writer = BinaryReader::from_file(&mut idx_file);
+    // idx_writer.set_endian(Endian::Big);
 
     let magic = uop_reader.read_u32()?;
     if magic != 0x50594D {
@@ -74,36 +83,133 @@ fn uop_to_mul(
                 continue;
             }
 
-            // if type -> multi
-            //let chunk_id: Option<&usize>;
-            // let mut chunk_id: &usize;
-            // if let chunk_id = chunk_ids0.get(&offset.identifier) {
-            // } else if let Some(temp_chunk_id) = chunk_ids1.get(&offset.identifier) {
-            //     chunk_id = temp_chunk_id;
-            // } else {
-            //     return Err(Error::new(std::io::ErrorKind::Other, "chunk id not found"));
-            // }
+            if file_type == FileType::Multi && offset.identifier == 0x126D1E99DDEDEE0A {
+                let mut bin = OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open("housing.bin")?;
 
-            let chunk_id = chunk_ids0.get(&offset.identifier)
-                      .unwrap_or_else(|| chunk_ids1.get(&offset.identifier).unwrap());
+                uop_reader.jmp((offset.offset as u64 + (offset.header_length as u64)) as usize);
+                let bin_data = uop_reader.read_bytes(offset.size as usize)?;
+                let mut bin_data_to_write = vec![];
+                bin_data_to_write.extend_from_slice(&bin_data);
+
+                if offset.compression == 1 {
+                    bin_data_to_write.clear();
+                    GzDecoder::new(bin_data).read(&mut bin_data_to_write)?;
+                }
+
+                bin.write(&bin_data_to_write)?;
+
+                continue;
+            }
+
+            let chunk_id = chunk_ids0
+                .get(&offset.identifier)
+                .unwrap_or_else(|| chunk_ids1.get(&offset.identifier).unwrap());
 
             uop_reader.jmp((offset.offset + (offset.header_length as i64)) as usize);
-            
+
             let chunk_data_raw = uop_reader.read_bytes(offset.size as usize)?;
-            let mut chunk_data = chunk_data_raw;
+            let mut chunk_data = vec![];
+            chunk_data.extend_from_slice(chunk_data_raw);
+
             if offset.compression == 1 {
-                chunk_data = GzDecoder::new(chunk_data_raw).get_mut();
+                chunk_data.clear();
+                chunk_data.extend_from_slice(GzDecoder::new(chunk_data_raw).get_mut());
             }
-            
-            // if type == map
-            // else
-            idx_file.seek(SeekFrom::Start(*chunk_id as u64 * 12))?;
-            idx_file.write(mul_file.stream_position().unwrap())?;
+
+            if file_type == FileType::Map {
+                mul_file.seek(SeekFrom::Start((chunk_id * 0xC4000) as u64))?;
+                mul_file.write(&chunk_data)?;
+            } else {
+                let mut data_offset = 0;
+
+                idx_file.seek(SeekFrom::Start(*chunk_id as u64 * 12))?;
+                idx_file.write(&(mul_file.stream_position()? as u32).to_be_bytes())?;
+
+                match file_type {
+                    FileType::Gump => {
+                        let width = u32::from_le_bytes([
+                            chunk_data[0],
+                            chunk_data[1],
+                            chunk_data[2],
+                            chunk_data[3],
+                        ]);
+                        let height = u32::from_le_bytes([
+                            chunk_data[4],
+                            chunk_data[5],
+                            chunk_data[6],
+                            chunk_data[7],
+                        ]);
+
+                        idx_file.write(&(chunk_data.len() - 8).to_be_bytes())?;
+                        idx_file.write(&((width << 16) | height).to_be_bytes())?;
+
+                        data_offset = 8;
+                    }
+                    FileType::Sound => {
+                        idx_file.write(&chunk_data.len().to_be_bytes())?;
+                        idx_file.write(&(chunk_id + 1).to_be_bytes())?;
+                    }
+                    FileType::Multi => {
+                        let mut multi_reader = BinaryReader::from_u8(&chunk_data);
+                        multi_reader.set_endian(Endian::Big);
+
+                        let mut vec = vec![];
+
+                        _ = multi_reader.read_u32()?;
+                        let count = multi_reader.read_u32()?;
+
+                        for _ in 0..count {
+                            let id = multi_reader.read_u16()?;
+                            let x = multi_reader.read_i16()?;
+                            let y = multi_reader.read_i16()?;
+                            let z = multi_reader.read_i16()?;
+                            let flags = multi_reader.read_u16()?;
+                            let cliloc_count = multi_reader.read_i32()?;
+
+                            if cliloc_count > 0 {
+                                multi_reader.adv(cliloc_count as usize * mem::size_of::<u32>());
+                            }
+
+                            id.to_be_bytes().map(|s| vec.push(s));
+                            x.to_be_bytes().map(|s| vec.push(s));
+                            y.to_be_bytes().map(|s| vec.push(s));
+                            z.to_be_bytes().map(|s| vec.push(s));
+                            (match flags {
+                                256u16 => 0x0000000100000001u64,
+                                257u16 | 1u16 => 0u64,
+                                _ => 1u64,
+                            })
+                            .to_be_bytes()
+                            .map(|s| vec.push(s));
+                        }
+
+                        let len = mul_file.stream_position()?;
+                        mul_file.seek(SeekFrom::Start(0))?;
+
+                        chunk_data = vec![0u8; len as usize];
+                        mul_file.read(&mut chunk_data)?;
+
+                        idx_file.write(&chunk_data.len().to_be_bytes())?;
+                        idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
+                    }
+                    _ => {
+                        idx_file.write(&chunk_data.len().to_be_bytes())?;
+                        idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
+                    }
+                }
+
+                mul_file.write(&chunk_data[data_offset..])?;
+            }
         }
 
         if next_table == 0 {
             break;
         }
+
+        uop_reader.jmp(next_table as usize);
     }
 
     Ok(())
@@ -295,6 +401,15 @@ fn hash_little2(s: &str) -> u64 {
     }
 
     ((b as u64) << 32) | (c as u64)
+}
+
+#[derive(Eq, PartialEq)]
+enum FileType {
+    Art,
+    Gump,
+    Map,
+    Sound,
+    Multi,
 }
 
 struct TableEntry {
