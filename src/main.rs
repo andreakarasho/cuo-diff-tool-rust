@@ -1,5 +1,5 @@
 use binary_reader::{BinaryReader, Endian};
-use flate2::read::GzDecoder;
+use flate2::{read::GzDecoder, bufread::ZlibDecoder};
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -14,13 +14,30 @@ fn main() {
     println!("start patching...");
     let start = Instant::now();
 
-    patch(PatchArgs {
-        source_dir: String::from("D:\\Giochi\\Ultima Online Classic"),
-        output_dir: String::from("./output"),
-        file_to_process: String::from("artLegacyMUL.uop"),
-    })
-    .unwrap();
+    let files = [
+        // "artLegacyMUL.uop", 
+        // "gumpartLegacyMUL.uop", 
+        // "MultiCollection.uop", 
+        // "soundLegacyMUL.uop",
+        "map0LegacyMUL.uop",
+        "map1LegacyMUL.uop",
+        "map2LegacyMUL.uop",
+        "map3LegacyMUL.uop",
+        "map4LegacyMUL.uop",
+        "map5LegacyMUL.uop"
+    ];
 
+    for f in files.iter() {
+        println!("running {}", &f);
+
+        patch(PatchArgs {
+            source_dir: String::from("D:\\Giochi\\Ultima Online Classic"),
+            output_dir: String::from("./output"),
+            file_to_process: String::from(*f),
+        })
+        .unwrap();
+    }
+   
     let duration = start.elapsed();
     println!("Time elapsed is: {:?}", duration);
 }
@@ -89,22 +106,26 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
             }
 
             if descriptor.file_type == FileType::Multi && offset.identifier == 0x126D1E99DDEDEE0A {
-                let mut bin = OpenOptions::new()
-                    .write(true)
-                    .append(true)
-                    .open("housing.bin")?;
+                let housing_path = Path::new("./housing.bin");
 
-                uop_reader.jmp((offset.offset as u64 + (offset.header_length as u64)) as usize);
-                let bin_data = uop_reader.read_bytes(offset.size as usize)?;
-                let mut bin_data_to_write = vec![];
-                bin_data_to_write.extend_from_slice(&bin_data);
-
-                if offset.compression == 1 {
-                    bin_data_to_write.clear();
-                    GzDecoder::new(bin_data).read(&mut bin_data_to_write)?;
+                if housing_path.exists() {
+                    let mut bin = OpenOptions::new()
+                        .write(true)
+                        .append(true)
+                        .open("housing.bin")?;
+    
+                    uop_reader.jmp((offset.offset as u64 + (offset.header_length as u64)) as usize);
+                    let bin_data = uop_reader.read_bytes(offset.size as usize)?;
+                    let mut bin_data_to_write = vec![];
+                    bin_data_to_write.extend_from_slice(&bin_data);
+    
+                    if offset.compression == 1 {
+                        bin_data_to_write.clear();
+                        ZlibDecoder::new(bin_data).read_to_end(&mut bin_data_to_write)?;
+                    }
+    
+                    bin.write(&bin_data_to_write)?;
                 }
-
-                bin.write(&bin_data_to_write)?;
 
                 continue;
             }
@@ -118,7 +139,7 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
 
                 if offset.compression == 1 {
                     chunk_data.clear();
-                    chunk_data.extend_from_slice(GzDecoder::new(chunk_data_raw).get_mut());
+                    ZlibDecoder::new(chunk_data_raw).read_to_end(&mut chunk_data)?;
                 }
 
                 if descriptor.file_type == FileType::Map {
@@ -187,12 +208,9 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                                 .to_le_bytes()
                                 .map(|s| vec.push(s));
                             }
-
-                            let len = mul_file.stream_position()?;
-                            mul_file.seek(SeekFrom::Start(0))?;
-
-                            chunk_data = vec![0u8; len as usize];
-                            mul_file.read(&mut chunk_data)?;
+                            
+                            chunk_data.clear();
+                            chunk_data.extend(&vec);
 
                             idx_file.write(&(chunk_data.len() as i32).to_le_bytes())?;
                             idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
@@ -260,7 +278,7 @@ fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
             MAX_ID,
         ),
         FileType::Multi => (
-            (0..u16::MAX)
+            (0..u16::MAX as i32)
                 .into_iter()
                 .map(|i| String::from(format!("build/multicollection/{:06}.bin", i)))
                 .collect(),
@@ -310,12 +328,12 @@ fn get_uop_mul_name(uop_file: &String) -> Option<(String, String, FileType, i32)
             -1,
         )),
         _ => {
-            let re = Regex::new(r"^map(\d+)LegacyMUL$").unwrap();
+            let re = Regex::new(r"^map(\d+)LegacyMUL.uop$").unwrap();
             if let Some(cap) = re.captures(uop_file) {
                 let num_str = cap.get(1).unwrap().as_str();
                 let num = num_str.parse::<i32>().ok().unwrap();
                 return Some((
-                    String::from(format!("map{}", num)),
+                    String::from(format!("map{}.mul", num)),
                     String::from(""),
                     FileType::Map,
                     num,
