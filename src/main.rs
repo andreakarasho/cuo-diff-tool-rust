@@ -1,13 +1,15 @@
 use binary_reader::{BinaryReader, Endian};
-use flate2::{read::GzDecoder, bufread::ZlibDecoder};
+use flate2::bufread::ZlibDecoder;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
     io::{Error, Read, Seek, SeekFrom, Write},
     mem,
     path::Path,
-    vec, time::Instant,
+    time::Instant,
+    vec,
 };
 
 fn main() {
@@ -15,16 +17,16 @@ fn main() {
     let start = Instant::now();
 
     let files = [
-        // "artLegacyMUL.uop", 
-        // "gumpartLegacyMUL.uop", 
-        // "MultiCollection.uop", 
-        // "soundLegacyMUL.uop",
+        "artLegacyMUL.uop",
+        "gumpartLegacyMUL.uop",
+        "MultiCollection.uop",
+        "soundLegacyMUL.uop",
         "map0LegacyMUL.uop",
         "map1LegacyMUL.uop",
         "map2LegacyMUL.uop",
         "map3LegacyMUL.uop",
         "map4LegacyMUL.uop",
-        "map5LegacyMUL.uop"
+        "map5LegacyMUL.uop",
     ];
 
     for f in files.iter() {
@@ -37,7 +39,7 @@ fn main() {
         })
         .unwrap();
     }
-   
+
     let duration = start.elapsed();
     println!("Time elapsed is: {:?}", duration);
 }
@@ -59,7 +61,7 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
 
     let mut uop_file = File::open(&Path::new(&args.source_dir).join(&args.file_to_process))?;
     let mut mul_file = File::create(&Path::new(&args.output_dir).join(&descriptor.mul))?;
-    let mut idx_file = File::create(&Path::new(&args.output_dir).join(&descriptor.idx))?;
+    let mut idx_file_maybe = File::create(&Path::new(&args.output_dir).join(&descriptor.idx));
 
     let mut uop_reader = BinaryReader::from_file(&mut uop_file);
     uop_reader.set_endian(Endian::Little);
@@ -113,17 +115,17 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                         .write(true)
                         .append(true)
                         .open("housing.bin")?;
-    
+
                     uop_reader.jmp((offset.offset as u64 + (offset.header_length as u64)) as usize);
                     let bin_data = uop_reader.read_bytes(offset.size as usize)?;
                     let mut bin_data_to_write = vec![];
                     bin_data_to_write.extend_from_slice(&bin_data);
-    
+
                     if offset.compression == 1 {
                         bin_data_to_write.clear();
                         ZlibDecoder::new(bin_data).read_to_end(&mut bin_data_to_write)?;
                     }
-    
+
                     bin.write(&bin_data_to_write)?;
                 }
 
@@ -145,7 +147,7 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                 if descriptor.file_type == FileType::Map {
                     mul_file.seek(SeekFrom::Start((chunk_id * 0xC4000) as u64))?;
                     mul_file.write(&chunk_data)?;
-                } else {
+                } else if let Ok(idx_file) = idx_file_maybe.as_mut() {
                     let mut data_offset = 0;
 
                     idx_file.seek(SeekFrom::Start(*chunk_id as u64 * 12))?;
@@ -179,7 +181,7 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                             let mut multi_reader = BinaryReader::from_u8(&chunk_data);
                             multi_reader.set_endian(Endian::Little);
 
-                            let mut vec = vec![];
+                            chunk_data.clear();
 
                             _ = multi_reader.read_u32()?;
                             let count = multi_reader.read_u32()?;
@@ -196,21 +198,19 @@ fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                                     multi_reader.adv(cliloc_count as usize * mem::size_of::<u32>());
                                 }
 
-                                id.to_le_bytes().map(|s| vec.push(s));
-                                x.to_le_bytes().map(|s| vec.push(s));
-                                y.to_le_bytes().map(|s| vec.push(s));
-                                z.to_le_bytes().map(|s| vec.push(s));
-                                (match flags {
-                                    256u16 => 0x0000000100000001u64,
-                                    257u16 | 1u16 => 0u64,
-                                    _ => 1u64,
-                                })
-                                .to_le_bytes()
-                                .map(|s| vec.push(s));
+                                chunk_data.extend(id.to_le_bytes());
+                                chunk_data.extend(x.to_le_bytes());
+                                chunk_data.extend(y.to_le_bytes());
+                                chunk_data.extend(z.to_le_bytes());
+                                chunk_data.extend(
+                                    (match flags {
+                                        256u16 => 0x0000000100000001u64,
+                                        257u16 | 1u16 => 0u64,
+                                        _ => 1u64,
+                                    })
+                                    .to_le_bytes(),
+                                );
                             }
-                            
-                            chunk_data.clear();
-                            chunk_data.extend(&vec);
 
                             idx_file.write(&(chunk_data.len() as i32).to_le_bytes())?;
                             idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
@@ -368,7 +368,6 @@ fn hash_little_2(s: &str) -> u64 {
         c = c.wrapping_add((s.as_bytes()[k + 10] as u32) << 16);
         c = c.wrapping_add((s.as_bytes()[k + 11] as u32) << 24);
 
-
         a = a.wrapping_sub(c);
         a ^= (c << 4) | (c >> 28);
 
@@ -393,7 +392,7 @@ fn hash_little_2(s: &str) -> u64 {
         c ^= (b << 4) | (b >> 28);
 
         b = b.wrapping_add(a);
-       
+
         length -= 12;
         k += 12;
     }
@@ -458,7 +457,7 @@ fn hash_little_2(s: &str) -> u64 {
 
         c ^= b;
         c = c.wrapping_sub((b << 14) | (b >> 18));
-        
+
         a ^= c;
         a = a.wrapping_sub((c << 11) | (c >> 21));
 
@@ -499,6 +498,7 @@ struct FileDescriptor {
     file_type: FileType,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 struct TableEntry {
     offset: i64,
     header_length: i32,
