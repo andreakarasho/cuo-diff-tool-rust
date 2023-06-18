@@ -7,7 +7,7 @@ use std::{
     io::{Error, Read, Seek, SeekFrom, Write},
     mem,
     path::Path,
-    vec,
+    vec, num::Wrapping,
 };
 
 use crate::args::PatchArgs;
@@ -32,7 +32,7 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
         .uop_patterns
         .iter()
         .enumerate()
-        .map(|(i, s)| (hash_little_2(&s), i))
+        .map(|(i, s)| (hash_little_2(&s.as_bytes()), i))
         .collect();
 
     let magic = uop_reader.read_u32()?;
@@ -99,7 +99,7 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
 
                 let chunk_data_raw = uop_reader.read_bytes(offset.size as usize)?;
                 let mut chunk_data = vec![];
-                chunk_data.extend_from_slice(chunk_data_raw);
+                chunk_data.extend_from_slice(&chunk_data_raw);
 
                 if offset.compression == 1 {
                     chunk_data.clear();
@@ -307,139 +307,62 @@ fn get_uop_mul_name(uop_file: &String) -> Option<(String, String, FileType, i32)
     }
 }
 
-fn hash_little_2(s: &str) -> u64 {
-    let mut length = s.len();
+fn hash_little_2(mut src: &[u8]) -> u64 {
+    let mut a = Wrapping((src.len() as u32).wrapping_add(0xdeadbeef));
+    let mut b = Wrapping((src.len() as u32).wrapping_add(0xdeadbeef));
+    let mut c = Wrapping((src.len() as u32).wrapping_add(0xdeadbeef));
 
-    let mut a = 0xDEADBEEF + length as u32;
-    let mut b = 0xDEADBEEF + length as u32;
-    let mut c = 0xDEADBEEF + length as u32;
+    while src.len() > 12 {
+        a += partial_read_u32(src);
+        b += partial_read_u32(&src[4..]);
+        c += partial_read_u32(&src[8..]);
 
-    let mut k = 0;
+        a = (a - c) ^ ((c << 4) | (c >> 28));
+        c += b;
+        b = (b - a) ^ ((a << 6) | (a >> 26));
+        a += c;
+        c = (c - b) ^ ((b << 8) | (b >> 24));
+        b += a;
+        a = (a - c) ^ ((c << 16) | (c >> 16));
+        c += b;
+        b = (b - a) ^ ((a << 19) | (a >> 13));
+        a += c;
+        c = (c - b) ^ ((b << 4) | (b >> 28));
+        b += a;
 
-    while length > 12 {
-        a = a.wrapping_add(s.as_bytes()[k] as u32);
-        a = a.wrapping_add((s.as_bytes()[k + 1] as u32) << 8);
-        a = a.wrapping_add((s.as_bytes()[k + 2] as u32) << 16);
-        a = a.wrapping_add((s.as_bytes()[k + 3] as u32) << 24);
-        b = b.wrapping_add(s.as_bytes()[k + 4] as u32);
-        b = b.wrapping_add((s.as_bytes()[k + 5] as u32) << 8);
-        b = b.wrapping_add((s.as_bytes()[k + 6] as u32) << 16);
-        b = b.wrapping_add((s.as_bytes()[k + 7] as u32) << 24);
-        c = c.wrapping_add(s.as_bytes()[k + 8] as u32);
-        c = c.wrapping_add((s.as_bytes()[k + 9] as u32) << 8);
-        c = c.wrapping_add((s.as_bytes()[k + 10] as u32) << 16);
-        c = c.wrapping_add((s.as_bytes()[k + 11] as u32) << 24);
-
-        a = a.wrapping_sub(c);
-        a ^= (c << 4) | (c >> 28);
-
-        c = c.wrapping_add(b);
-        b = b.wrapping_sub(a);
-        b ^= (a << 6) | (a >> 26);
-
-        a = a.wrapping_add(c);
-        c = c.wrapping_sub(b);
-        c ^= (b << 8) | (b >> 24);
-
-        b = b.wrapping_add(a);
-        a = a.wrapping_sub(c);
-        a ^= (c << 16) | (c >> 16);
-
-        c = c.wrapping_add(b);
-        b = b.wrapping_sub(a);
-        b ^= (a << 19) | (a >> 13);
-
-        a = a.wrapping_add(c);
-        c = c.wrapping_sub(b);
-        c ^= (b << 4) | (b >> 28);
-
-        b = b.wrapping_add(a);
-
-        length -= 12;
-        k += 12;
+        src = &src[12..];
     }
 
-    if length != 0 {
-        let mut remains = length;
+    if src.len() > 0 {
+        a += partial_read_u32(src);
 
-        while remains > 0 {
-            match remains {
-                12 => {
-                    c = c.wrapping_add((s.as_bytes()[k + 11] as u32) << 24);
-                    // fallthrough
-                }
-                11 => {
-                    c = c.wrapping_add((s.as_bytes()[k + 10] as u32) << 16);
-                    // fallthrough
-                }
-                10 => {
-                    c = c.wrapping_add((s.as_bytes()[k + 9] as u32) << 8);
-                    // fallthrough
-                }
-                9 => {
-                    c = c.wrapping_add(s.as_bytes()[k + 8] as u32);
-                    // fallthrough
-                }
-                8 => {
-                    b = b.wrapping_add((s.as_bytes()[k + 7] as u32) << 24);
-                    // fallthrough
-                }
-                7 => {
-                    b = b.wrapping_add((s.as_bytes()[k + 6] as u32) << 16);
-                    // fallthrough
-                }
-                6 => {
-                    b = b.wrapping_add((s.as_bytes()[k + 5] as u32) << 8);
-                    // fallthrough
-                }
-                5 => {
-                    b = b.wrapping_add(s.as_bytes()[k + 4] as u32);
-                    // fallthrough
-                }
-                4 => {
-                    a = a.wrapping_add((s.as_bytes()[k + 3] as u32) << 24);
-                    // fallthrough
-                }
-                3 => {
-                    a = a.wrapping_add((s.as_bytes()[k + 2] as u32) << 16);
-                    // fallthrough
-                }
-                2 => {
-                    a = a.wrapping_add((s.as_bytes()[k + 1] as u32) << 8);
-                    // fallthrough
-                }
-                1 => {
-                    a = a.wrapping_add(s.as_bytes()[k] as u32);
-                }
-                _ => unreachable!(),
-            }
-
-            remains -= 1;
+        if src.len() >= 4 {
+            b += partial_read_u32(&src[4..]);
         }
 
-        c ^= b;
-        c = c.wrapping_sub((b << 14) | (b >> 18));
+        if src.len() >= 8 {
+            c += partial_read_u32(&src[8..]);
+        }
 
-        a ^= c;
-        a = a.wrapping_sub((c << 11) | (c >> 21));
-
-        b ^= a;
-        b = b.wrapping_sub((a << 25) | (a >> 7));
-
-        c ^= b;
-        c = c.wrapping_sub((b << 16) | (b >> 16));
-
-        a ^= c;
-        a = a.wrapping_sub((c << 4) | (c >> 28));
-
-        b ^= a;
-        b = b.wrapping_sub((a << 14) | (a >> 18));
-
-        c ^= b;
-        c = c.wrapping_sub((b << 24) | (b >> 8));
+        c = (c ^ b) - ((b << 14) | (b >> 18));
+        a = (a ^ c) - ((c << 11) | (c >> 21));
+        b = (b ^ a) - ((a << 25) | (a >> 7));
+        c = (c ^ b) - ((b << 16) | (b >> 16));
+        a = (a ^ c) - ((c << 4) | (c >> 28));
+        b = (b ^ a) - ((a << 14) | (a >> 18));
+        c = (c ^ b) - ((b << 24) | (b >> 8));
     }
 
-    ((b as u64) << 32) | (c as u64)
+    ((b.0 as u64) << 32) | (c.0 as u64)
+}
+
+fn partial_read_u32(s: &[u8]) -> Wrapping<u32> {
+    let a = *s.get(0).unwrap_or(&0) as u32;
+    let b = *s.get(1).unwrap_or(&0) as u32;
+    let c = *s.get(2).unwrap_or(&0) as u32;
+    let d = *s.get(3).unwrap_or(&0) as u32;
+
+    Wrapping(a | (b << 8) | (c << 16) | (d << 24))
 }
 
 #[derive(Eq, PartialEq)]
