@@ -13,6 +13,12 @@ use std::{
 use crate::args::PatchArgs;
 
 pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
+    let output_path = Path::new(&args.output_dir);
+
+    if !output_path.exists() {
+        std::fs::create_dir_all(&output_path)?;
+    }
+
     let descriptor = get_file_descriptor(&args.file_to_process);
 
     let mut uop_file = File::open(&Path::new(&args.source_dir).join(&args.file_to_process))?;
@@ -124,14 +130,14 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                                 chunk_data[7],
                             ]);
 
-                            idx_file.write(&(chunk_data.len() - 8).to_le_bytes())?;
+                            idx_file.write(&((chunk_data.len() - 8) as i32).to_le_bytes())?;
                             idx_file.write(&((width << 16) | height).to_le_bytes())?;
 
                             data_offset = 8;
                         }
                         FileType::Sound => {
-                            idx_file.write(&chunk_data.len().to_le_bytes())?;
-                            idx_file.write(&(chunk_id + 1).to_le_bytes())?;
+                            idx_file.write(&(chunk_data.len() as i32).to_le_bytes())?;
+                            idx_file.write(&((chunk_id + 1) as i32).to_le_bytes())?;
                         }
                         FileType::Multi => {
                             let mut multi_reader = BinaryReader::from_u8(&chunk_data);

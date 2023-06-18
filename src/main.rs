@@ -44,12 +44,6 @@ fn main() {
 }
 
 fn patch(args: &PatchArgs) -> std::io::Result<()> {
-    let output_path = Path::new(&args.output_dir);
-
-    if !output_path.exists() {
-        std::fs::create_dir_all(&output_path)?;
-    }
-
     uop_to_mul(&args)?;
 
     Ok(())
