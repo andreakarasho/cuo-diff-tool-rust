@@ -6,8 +6,9 @@ use std::{
     fs::{File, OpenOptions},
     io::{Error, Read, Seek, SeekFrom, Write},
     mem,
+    num::Wrapping,
     path::Path,
-    vec, num::Wrapping,
+    vec,
 };
 
 use crate::args::PatchArgs;
@@ -16,7 +17,7 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
     let output_path = Path::new(&args.output_dir);
 
     if !output_path.exists() {
-        std::fs::create_dir_all(&output_path)?;
+        std::fs::create_dir_all(output_path)?;
     }
 
     let descriptor = get_file_descriptor(&args.file_to_process);
@@ -32,7 +33,7 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
         .uop_patterns
         .iter()
         .enumerate()
-        .map(|(i, s)| (hash_little_2(&s.as_bytes()), i))
+        .map(|(i, s)| (hash_little_2(s.as_bytes()), i))
         .collect();
 
     let magic = uop_reader.read_u32()?;
@@ -81,14 +82,14 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                     uop_reader.jmp((offset.offset as u64 + (offset.header_length as u64)) as usize);
                     let bin_data = uop_reader.read_bytes(offset.size as usize)?;
                     let mut bin_data_to_write = vec![];
-                    bin_data_to_write.extend_from_slice(&bin_data);
+                    bin_data_to_write.extend_from_slice(bin_data);
 
                     if offset.compression == 1 {
                         bin_data_to_write.clear();
                         ZlibDecoder::new(bin_data).read_to_end(&mut bin_data_to_write)?;
                     }
 
-                    bin.write(&bin_data_to_write)?;
+                    bin.write_all(&bin_data_to_write)?;
                 }
 
                 continue;
@@ -99,7 +100,7 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
 
                 let chunk_data_raw = uop_reader.read_bytes(offset.size as usize)?;
                 let mut chunk_data = vec![];
-                chunk_data.extend_from_slice(&chunk_data_raw);
+                chunk_data.extend_from_slice(chunk_data_raw);
 
                 if offset.compression == 1 {
                     chunk_data.clear();
@@ -108,12 +109,12 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
 
                 if descriptor.file_type == FileType::Map {
                     mul_file.seek(SeekFrom::Start((chunk_id * 0xC4000) as u64))?;
-                    mul_file.write(&chunk_data)?;
+                    mul_file.write_all(&chunk_data)?;
                 } else if let Ok(idx_file) = idx_file_maybe.as_mut() {
                     let mut data_offset = 0;
 
                     idx_file.seek(SeekFrom::Start(*chunk_id as u64 * 12))?;
-                    idx_file.write(&(mul_file.stream_position()? as u32).to_le_bytes())?;
+                    idx_file.write_all(&(mul_file.stream_position()? as u32).to_le_bytes())?;
 
                     match descriptor.file_type {
                         FileType::Gump => {
@@ -130,14 +131,14 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                                 chunk_data[7],
                             ]);
 
-                            idx_file.write(&((chunk_data.len() - 8) as i32).to_le_bytes())?;
-                            idx_file.write(&((width << 16) | height).to_le_bytes())?;
+                            idx_file.write_all(&((chunk_data.len() - 8) as i32).to_le_bytes())?;
+                            idx_file.write_all(&((width << 16) | height).to_le_bytes())?;
 
                             data_offset = 8;
                         }
                         FileType::Sound => {
-                            idx_file.write(&(chunk_data.len() as i32).to_le_bytes())?;
-                            idx_file.write(&((chunk_id + 1) as i32).to_le_bytes())?;
+                            idx_file.write_all(&(chunk_data.len() as i32).to_le_bytes())?;
+                            idx_file.write_all(&((chunk_id + 1) as i32).to_le_bytes())?;
                         }
                         FileType::Multi => {
                             let mut multi_reader = BinaryReader::from_u8(&chunk_data);
@@ -174,16 +175,16 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
                                 );
                             }
 
-                            idx_file.write(&(chunk_data.len() as i32).to_le_bytes())?;
-                            idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
+                            idx_file.write_all(&(chunk_data.len() as i32).to_le_bytes())?;
+                            idx_file.write_all(&[0u8, 0u8, 0u8, 0u8])?;
                         }
                         _ => {
-                            idx_file.write(&(chunk_data.len() as i32).to_le_bytes())?;
-                            idx_file.write(&[0u8, 0u8, 0u8, 0u8])?;
+                            idx_file.write_all(&(chunk_data.len() as i32).to_le_bytes())?;
+                            idx_file.write_all(&[0u8, 0u8, 0u8, 0u8])?;
                         }
                     }
 
-                    mul_file.write(&chunk_data[data_offset..])?;
+                    mul_file.write_all(&chunk_data[data_offset..])?;
                 }
             }
         }
@@ -198,51 +199,45 @@ pub fn uop_to_mul(args: &PatchArgs) -> std::io::Result<()> {
     Ok(())
 }
 
-fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
-    let (mul_name, idx_name, file_type, type_index) = get_uop_mul_name(&uop_file).unwrap();
+fn get_file_descriptor(uop_file: &str) -> FileDescriptor {
+    let (mul_name, idx_name, file_type, type_index) = get_uop_mul_name(uop_file).unwrap();
 
     const MAX_ID: i32 = 0x7FFFF;
 
     let (pattern0, pattern1, max_index) = match file_type {
         FileType::Art => (
             (0..0x13FDC)
-                .into_iter()
-                .map(|i| String::from(format!("build/artlegacymul/{:08}.tga", i)))
+                .map(|i| format!("build/artlegacymul/{:08}.tga", i))
                 .collect::<Vec<String>>(),
             Vec::<String>::new(),
             0x13FDC,
         ),
         FileType::Gump => (
             (0..MAX_ID)
-                .into_iter()
-                .map(|i| String::from(format!("build/gumpartlegacymul/{:08}.tga", i)))
+                .map(|i| format!("build/gumpartlegacymul/{:08}.tga", i))
                 .collect(),
             (0..MAX_ID)
-                .into_iter()
-                .map(|i| String::from(format!("build/gumpartlegacymul/{:07}.tga", i)))
+                .map(|i| format!("build/gumpartlegacymul/{:07}.tga", i))
                 .collect(),
             MAX_ID,
         ),
         FileType::Map => (
             (0..MAX_ID)
-                .into_iter()
-                .map(|i| String::from(format!("build/map{}legacymul/{:08}.dat", type_index, i)))
+                .map(|i| format!("build/map{}legacymul/{:08}.dat", type_index, i))
                 .collect(),
             Vec::<String>::new(),
             MAX_ID,
         ),
         FileType::Sound => (
             (0..MAX_ID)
-                .into_iter()
-                .map(|i| String::from(format!("build/soundlegacymul/{:08}.dat", i)))
+                .map(|i| format!("build/soundlegacymul/{:08}.dat", i))
                 .collect(),
             Vec::<String>::new(),
             MAX_ID,
         ),
         FileType::Multi => (
             (0..u16::MAX as i32)
-                .into_iter()
-                .map(|i| String::from(format!("build/multicollection/{:06}.bin", i)))
+                .map(|i| format!("build/multicollection/{:06}.bin", i))
                 .collect(),
             Vec::<String>::new(),
             u16::MAX as i32,
@@ -254,17 +249,17 @@ fn get_file_descriptor(uop_file: &String) -> FileDescriptor {
     all_patterns.extend(pattern1);
 
     FileDescriptor {
-        uop: uop_file.clone(),
+        uop: uop_file.to_owned(),
         uop_patterns: all_patterns,
-        max_index: max_index,
+        max_index,
         mul: mul_name,
         idx: idx_name,
-        file_type: file_type,
+        file_type,
     }
 }
 
-fn get_uop_mul_name(uop_file: &String) -> Option<(String, String, FileType, i32)> {
-    match uop_file.as_str() {
+fn get_uop_mul_name(uop_file: &str) -> Option<(String, String, FileType, i32)> {
+    match uop_file {
         "artLegacyMUL.uop" => Some((
             String::from("art.mul"),
             String::from("artidx.mul"),
@@ -295,7 +290,7 @@ fn get_uop_mul_name(uop_file: &String) -> Option<(String, String, FileType, i32)
                 let num_str = cap.get(1).unwrap().as_str();
                 let num = num_str.parse::<i32>().ok().unwrap();
                 return Some((
-                    String::from(format!("map{}.mul", num)),
+                    format!("map{}.mul", num),
                     String::from(""),
                     FileType::Map,
                     num,
@@ -333,7 +328,7 @@ fn hash_little_2(mut src: &[u8]) -> u64 {
         src = &src[12..];
     }
 
-    if src.len() > 0 {
+    if !src.is_empty() {
         a += partial_read_u32(src);
 
         if src.len() >= 4 {
