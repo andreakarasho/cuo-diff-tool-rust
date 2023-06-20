@@ -352,7 +352,7 @@ fn hash_little_2(mut src: &[u8]) -> u64 {
 }
 
 fn partial_read_u32(s: &[u8]) -> Wrapping<u32> {
-    let a = *s.get(0).unwrap_or(&0) as u32;
+    let a = *s.first().unwrap_or(&0) as u32;
     let b = *s.get(1).unwrap_or(&0) as u32;
     let c = *s.get(2).unwrap_or(&0) as u32;
     let d = *s.get(3).unwrap_or(&0) as u32;
